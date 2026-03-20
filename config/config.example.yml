@@ -1,0 +1,30 @@
+# Agent Pipeline Config
+# Copy to config.yml and fill in your values
+
+pm_tool:
+  base_url: "http://100.115.61.30:8000/api"
+  project_id: "c719a8f5-86e8-4620-99d3-05f2c2ee4f37"
+  columns:
+    queue: "40149a13-a223-466b-b4e3-9b1ede45db8e"
+    in_progress: "724ce286-8fec-4150-9897-8f042b566fa4"
+    review: "4fa54724-4c0e-42a5-a15b-cd8942a3389b"
+    done: "b4b10fd6-6eae-4239-a951-72926000c921"
+
+nvidia_nim:
+  api_key: "nvapi-YOUR-KEY-HERE"
+  endpoint: "https://integrate.api.nvidia.com/v1/chat/completions"
+
+models:
+  mistral:
+    id: "mistralai/mistral-large-3-675b-instruct-2512"
+    max_tokens: 8192
+    use_for: ["coding", "scripts", "implementation"]
+  kimi:
+    id: "moonshotai/kimi-k2.5"
+    max_tokens: 8192
+    use_for: ["research", "analysis", "summaries"]
+
+worker:
+  cron: "*/5 * * * *"
+  tasks_per_run: 1
+  timeout_seconds: 120

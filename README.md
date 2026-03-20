@@ -1,227 +1,222 @@
 # 🤖 Agent Pipeline — Clay Machine Games
 
-> Eine Multi-Agent-Infrastruktur für autonome Task-Verarbeitung.  
-> Agenten kommunizieren über das PM Tool als gemeinsame Aufgabenbasis.
+> Multi-Agent Task-Pipeline: Günstige LLMs erledigen Coding-Tasks, teure reviewen.  
+> PM Tool als zentraler Message Bus. Cron-getrieben. Vollautomatisch.
 
 ---
 
 ## Überblick
 
-Die Agent Pipeline verbindet PRISM, Kimi, Forge und zukünftige Agenten über ein **PM-Tool-zentriertes Task-System**. Statt direkter API-Kommunikation (fehleranfällig) nutzen alle Agenten das PM Tool als **gemeinsamen Nachrichtenbus** — strukturiert, persistent, nachvollziehbar.
+Die Agent Pipeline delegiert Coding- und Research-Tasks an **günstige LLMs** (Mistral, Kimi) via NVIDIA NIM API. Ergebnisse werden im PM Tool zur Review bereitgestellt. PRISM (Claude) reviewed und korrigiert nur bei Bedarf — **Token-Kosten sinken um 80-90%**.
 
-```mermaid
-graph TB
-    subgraph Human["👤 Druid"]
-        D[Matthias]
-    end
-
-    subgraph PMTool["📋 PM Tool (Shared Bus)"]
-        direction LR
-        COL_IN[📥 Inbox-Spalte<br/>neue Tasks]
-        COL_WIP[⚙️ In Progress<br/>wird bearbeitet]
-        COL_REVIEW[🔍 Review<br/>Ergebnis wartet]
-        COL_DONE[✅ Done<br/>abgeschlossen]
-        COL_IN --> COL_WIP --> COL_REVIEW --> COL_DONE
-    end
-
-    subgraph Agents["🤖 Agenten"]
-        PRISM[🔮 PRISM<br/>Orchestrator]
-        KIMI[🌙 Kimi K2.5<br/>Research / Analyse]
-        FORGE[⚒️ Forge<br/>Code / Build]
-    end
-
-    D -->|Task erstellen| COL_IN
-    PRISM -->|Task erstellen| COL_IN
-    PRISM -->|Cron: pollt alle 2min| COL_IN
-    PRISM -->|zuweisen| KIMI
-    PRISM -->|zuweisen| FORGE
-    KIMI -->|Ergebnis| COL_REVIEW
-    FORGE -->|Ergebnis| COL_REVIEW
-    PRISM -->|validiert + merged| COL_DONE
-    PRISM -->|Telegram| D
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────┐
+│   📥 Queue   │────▶│ ⚙️ In Prog.  │────▶│  🔍 Review   │────▶│  ✅ Done  │
+│  (Backlog)   │     │  (LLM läuft) │     │ (PRISM prüft)│     │          │
+└─────────────┘     └──────────────┘     └──────────────┘     └──────────┘
+       ▲                    │
+       │              ┌─────┴─────┐
+  Dispatch:           │  NVIDIA   │
+  - PRISM             │  NIM API  │
+  - Druid             ├───────────┤
+  - Cron/Ideation     │ Mistral   │ ← Coding (default)
+  - Andere Agenten    │ Kimi K2.5 │ ← Research/Analyse
+                      └───────────┘
 ```
 
 ---
 
-## Kernprinzipien
+## Architektur
 
-| Prinzip | Beschreibung |
-|---|---|
-| **PM Tool als Bus** | Kein direkter Agent-zu-Agent-API-Call — alles läuft über Tasks |
-| **Cron-getrieben** | PRISM pollt alle 2min die Inbox-Spalte auf neue Tasks |
-| **Async by default** | Agenten arbeiten unabhängig, PRISM koordiniert |
-| **Druid bleibt informiert** | Telegram-Notification bei Task-Start und -Abschluss |
-| **Nachvollziehbar** | Jeder Schritt ist im PM Tool sichtbar |
+### Komponenten
 
----
-
-## Architektur-Detail
+| Komponente | Datei | Beschreibung |
+|---|---|---|
+| **Worker** | `scripts/agent_worker.py` | Pollt Queue, delegiert an LLM, postet Ergebnis |
+| **Dispatcher** | `scripts/agent_dispatch.py` | CLI zum Einstellen neuer Tasks |
+| **Config** | `config/config.yml` | IDs, API Keys, Model-Config |
+| **Cron** | OpenClaw `agent-worker` | Läuft alle 5 Minuten |
 
 ### Task-Lifecycle
 
 ```mermaid
 sequenceDiagram
-    actor Druid
-    participant PM as PM Tool
-    participant PRISM as 🔮 PRISM
-    participant Agent as 🤖 Spezialist-Agent
+    participant D as 👤 Druid / PRISM
+    participant Q as 📥 Queue
+    participant W as 🤖 Worker (Cron)
+    participant L as 🧠 LLM (Mistral/Kimi)
+    participant R as 🔍 Review
 
-    Druid->>PM: Task anlegen (Inbox, agent: Kimi/Forge)
-    Note over PM: Task liegt in Inbox-Spalte
-
-    loop Cron alle 2 Minuten
-        PRISM->>PM: GET /api/projects/{id}/tasks (Inbox-Spalte)
-        PM-->>PRISM: Liste neuer Tasks
-    end
-
-    PRISM->>PM: Task → In Progress verschieben
-    PRISM->>Agent: Task-Payload via Dispatch / direkter Aufruf
-    PRISM->>Druid: 📱 Telegram: "Task gestartet: [Titel]"
-
-    Agent->>Agent: Aufgabe ausführen
-    Agent->>PM: Ergebnis als Kommentar + Task → Review
-    PRISM->>PM: Cron erkennt Review-Task
-    PRISM->>PRISM: Ergebnis validieren
-    PRISM->>PM: Task → Done
-    PRISM->>Druid: 📱 Telegram: "Task erledigt: [Titel] ✅"
+    D->>Q: Task erstellen (dispatch.py / API)
+    W->>Q: Poll (alle 5min)
+    Q->>W: Ältester Task
+    W->>W: Move → In Progress
+    W->>L: Prompt senden
+    L->>W: Code / Ergebnis
+    W->>R: Ergebnis in Description + Move → Review
+    D->>R: Prüfen, korrigieren, mergen
+    R-->>R: Move → Done
 ```
 
-### Task-Struktur
+### Model-Routing
 
-Jeder Task im PM Tool folgt diesem Schema:
+| Trigger-Keywords | Model | Use Case |
+|---|---|---|
+| *(default)* | **Mistral Large 3** | Coding, Scripts, Implementierung |
+| research, analyse, recherche, zusammenfass | **Kimi K2.5** | Research, Analyse, Zusammenfassungen |
 
-```yaml
-title: "[AgentTag] Kurze Beschreibung"
-description: |
-  ## Aufgabe
-  Konkrete Beschreibung was zu tun ist.
+Routing passiert automatisch basierend auf Task-Titel + Description.
 
-  ## Kontext
-  Relevante Hintergrundinformationen.
+---
 
-  ## Erwartetes Ergebnis
-  Was soll der Agent liefern?
+## Setup
 
-  ## Output-Format
-  Code / Markdown / JSON / etc.
+### Voraussetzungen
 
-priority: low | medium | high | critical
-labels:
-  - agent:kimi      # Ziel-Agent
-  - type:research   # Task-Typ
-  - project:mmc     # Projekt-Kontext
+- Python 3.10+
+- PM Tool läuft auf `http://100.115.61.30:8000` (Tailscale)
+- NVIDIA NIM API Key ([build.nvidia.com](https://build.nvidia.com))
+- OpenClaw (für Cron)
+
+### Installation
+
+```bash
+# Repo klonen
+git clone https://github.com/AstroGolem224/Agent-Pipeline.git
+cd Agent-Pipeline
+
+# Config anpassen
+cp config/config.example.yml config/config.yml
+# → API Keys + PM Tool URL eintragen
+
+# Scripts in Workspace verlinken (optional)
+ln -s $(pwd)/scripts/agent_worker.py ~/.openclaw/workspace/scripts/agent_worker.py
+ln -s $(pwd)/scripts/agent_dispatch.py ~/.openclaw/workspace/scripts/agent_dispatch.py
 ```
 
-### Agent-Rollen
+### Cron einrichten (OpenClaw)
 
-```mermaid
-graph LR
-    subgraph PRISM["🔮 PRISM — Orchestrator"]
-        P1[Cron Polling]
-        P2[Task Routing]
-        P3[Result Validation]
-        P4[Druid Notification]
-    end
-
-    subgraph KIMI["🌙 Kimi K2.5 — Research"]
-        K1[Marktanalyse]
-        K2[Technische Recherche]
-        K3[Dokumentation]
-        K4[Ideation / Brainstorm]
-    end
-
-    subgraph FORGE["⚒️ Forge — Engineering"]
-        F1[Code schreiben]
-        F2[Refactoring]
-        F3[Build & Deploy]
-        F4[Bug Fixing]
-    end
-
-    P2 -->|research/analyse Tasks| KIMI
-    P2 -->|code/build Tasks| FORGE
-    KIMI -->|Ergebnis| P3
-    FORGE -->|Ergebnis| P3
+```bash
+openclaw cron add \
+  --name agent-worker \
+  --cron "*/5 * * * *" \
+  --message "Führe aus: python3 scripts/agent_worker.py — Return summary." \
+  --model anthropic/claude-sonnet-4-6 \
+  --session isolated \
+  --no-deliver \
+  --light-context \
+  --timeout-seconds 120
 ```
 
 ---
 
-## Routing-Logik
+## Nutzung
 
-PRISM entscheidet anhand von Labels und Titel-Prefix welcher Agent einen Task bekommt:
+### Task einstellen (CLI)
 
-```mermaid
-flowchart TD
-    START([Neuer Task in Inbox]) --> CHECK{Label vorhanden?}
+```bash
+python3 scripts/agent_dispatch.py "Titel" "Beschreibung" [priority]
 
-    CHECK -->|agent:kimi| KIMI[→ Kimi K2.5]
-    CHECK -->|agent:forge| FORGE[→ Forge]
-    CHECK -->|agent:prism| SELF[→ PRISM selbst]
-    CHECK -->|kein Label| INFER{Titel-Analyse}
+# Beispiele:
+python3 scripts/agent_dispatch.py \
+  "Python: Rate Limiter Middleware" \
+  "Schreibe eine async Rate-Limiter Middleware für FastAPI. Token Bucket, 100 req/min."
 
-    INFER -->|research / analyse / docs| KIMI
-    INFER -->|code / build / fix / deploy| FORGE
-    INFER -->|unklar| DRUID[❓ Druid fragen]
+python3 scripts/agent_dispatch.py \
+  "GDScript: Dash-Ability" \
+  "Implementiere eine Dash-Ability für CharacterBody2D. 200px Distanz, 0.2s Dauer, 3s Cooldown."
+```
 
-    KIMI --> WORK[Aufgabe ausführen]
-    FORGE --> WORK
-    SELF --> WORK
-    WORK --> RESULT[Ergebnis in PM Tool]
+### Task einstellen (API)
+
+```bash
+curl -X POST http://100.115.61.30:8000/api/tasks \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "c719a8f5-86e8-4620-99d3-05f2c2ee4f37",
+    "column_id": "40149a13-a223-466b-b4e3-9b1ede45db8e",
+    "title": "[AGENT] Task-Beschreibung",
+    "description": "Detaillierte Anforderungen...",
+    "priority": "medium"
+  }'
+```
+
+### Task einstellen (von anderen Agenten)
+
+Jeder Agent der Tailscale-Zugang hat kann Tasks einstellen:
+
+```python
+import urllib.request, json
+
+def dispatch_task(title, description, priority="medium"):
+    payload = {
+        "project_id": "c719a8f5-86e8-4620-99d3-05f2c2ee4f37",
+        "column_id": "40149a13-a223-466b-b4e3-9b1ede45db8e",
+        "title": title,
+        "description": description,
+        "priority": priority,
+    }
+    req = urllib.request.Request(
+        "http://100.115.61.30:8000/api/tasks",
+        data=json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST"
+    )
+    with urllib.request.urlopen(req) as r:
+        return json.loads(r.read())
 ```
 
 ---
 
-## Projektstruktur (dieses Repo)
+## PM Tool IDs
 
-```
-Agent-Pipeline/
-├── README.md               # Diese Datei — Architektur-Überblick
-├── docs/
-│   ├── ARCHITECTURE.md     # Detaillierte Technische Architektur
-│   ├── ROUTING.md          # Routing-Regeln & Agent-Capabilities
-│   └── TASK_SCHEMA.md      # Task-Format-Spezifikation
-├── scripts/
-│   ├── poller.py           # PRISM Cron-Poller (PM Tool → Agent Dispatch)
-│   ├── dispatcher.py       # Task an richtigen Agent weiterleiten
-│   └── notifier.py         # Telegram-Benachrichtigungen
-├── agents/
-│   ├── kimi.py             # Kimi K2.5 Interface (NVIDIA NIM)
-│   └── forge.py            # Forge Interface
-└── config/
-    └── config.yml          # PM Tool IDs, API Keys, Routing-Regeln
-```
+| Resource | ID |
+|---|---|
+| **Project** | `c719a8f5-86e8-4620-99d3-05f2c2ee4f37` |
+| **Queue** (Backlog) | `40149a13-a223-466b-b4e3-9b1ede45db8e` |
+| **In Progress** | `724ce286-8fec-4150-9897-8f042b566fa4` |
+| **Review** | `4fa54724-4c0e-42a5-a15b-cd8942a3389b` |
+| **Done** | `b4b10fd6-6eae-4239-a951-72926000c921` |
 
 ---
 
-## Implementierungs-Roadmap
+## LLM-Kosten vs. PRISM direkt
 
-```mermaid
-gantt
-    title Agent Pipeline — Aufbau-Plan
-    dateFormat  YYYY-MM-DD
-    section Phase 1 — Grundgerüst
-    PM Tool Inbox-Spalte einrichten     :done,    p1a, 2026-03-19, 1d
-    poller.py — Cron-Polling            :active,  p1b, 2026-03-19, 2d
-    dispatcher.py — Routing-Logik      :         p1c, after p1b, 2d
-    section Phase 2 — Agenten
-    Kimi Interface (NVIDIA NIM)         :         p2a, after p1c, 3d
-    Forge Interface                     :         p2b, after p1c, 3d
-    Telegram Notifier                   :         p2c, after p1c, 2d
-    section Phase 3 — Produktion
-    End-to-End Test mit echtem Task     :         p3a, after p2a, 2d
-    Error Handling + Retry-Logik        :         p3b, after p3a, 2d
-    Monitoring + Logs                   :         p3c, after p3b, 2d
+| Szenario | Model | ~Kosten/Task | Qualität |
+|---|---|---|---|
+| PRISM direkt (Claude) | Sonnet 4.6 | ~$0.05-0.15 | ⭐⭐⭐⭐⭐ |
+| Agent Pipeline | Mistral Large 3 | ~$0.001-0.005 | ⭐⭐⭐⭐ |
+| Agent Pipeline | Kimi K2.5 | kostenlos (NIM) | ⭐⭐⭐ |
+| **Hybrid** (Pipeline + PRISM Review) | Mistral + Claude | ~$0.01-0.03 | ⭐⭐⭐⭐⭐ |
+
+**Ersparnis: 80-95%** bei vergleichbarer Qualität durch Review-only statt Full-Generation.
+
+---
+
+## Logs
+
+```bash
+# Worker-Log
+tail -f /tmp/agent-worker.log
+
+# Cron-Status
+openclaw cron list
 ```
 
 ---
 
-## Nächste Schritte
+## Roadmap
 
-1. **PM Tool**: Inbox-Spalte im richtigen Projekt anlegen (oder dediziertes "Agent-Tasks" Projekt)
-2. **`scripts/poller.py`** schreiben — fragt alle 2min die Inbox-Spalte ab
-3. **Labels definieren** — `agent:kimi`, `agent:forge`, `type:research`, etc.
-4. **Kimi Interface** — NVIDIA NIM API (bereits in TOOLS.md konfiguriert)
-5. **Telegram Notifier** — PRISM postet Start/Ende an Druid
+- [ ] Retry-Logic mit Backoff bei API-Fehlern
+- [ ] Multi-Task-Processing (Batch statt 1 pro Run)
+- [ ] File-Context: Relevante Codedateien als Kontext mitschicken
+- [ ] Auto-Apply: Review-Tasks automatisch in Codebase mergen (mit Git)
+- [ ] Quality-Gate: Automatische Validierung (Syntax-Check, Tests)
+- [ ] Agent-Heartbeat: Status-Monitoring im PM Tool
+- [ ] Weitere Models: DeepSeek, Llama, Gemma
 
 ---
 
-*Architektur-Dokument erstellt von PRISM 🔮 — 19.03.2026*
+## Lizenz
+
+Intern — Clay Machine Games © 2026
