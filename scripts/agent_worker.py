@@ -5,6 +5,11 @@ posts results back to Review column. PRISM reviews and merges.
 Runs via cron every 5 minutes.
 """
 import json, os, sys, urllib.request, urllib.parse, time, traceback
+try:
+    import requests as _requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
 
 # ─── Config ───
 PM_BASE = "http://100.115.61.30:8000/api"
@@ -15,7 +20,7 @@ COL_REVIEW = "4fa54724-4c0e-42a5-a15b-cd8942a3389b"
 COL_DONE = "b4b10fd6-6eae-4239-a951-72926000c921"
 
 # LLM backends (cheapest first)
-NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "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")
+NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "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")
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
 MODELS = {
@@ -71,16 +76,26 @@ def call_llm(model_key, system_prompt, user_prompt):
             {"role": "user", "content": user_prompt},
         ],
         "max_tokens": cfg["max_tokens"],
-        "temperature": 0.3,
+        "temperature": 0.15,
+        "top_p": 1.0,
+        "frequency_penalty": 0.0,
+        "presence_penalty": 0.0,
+        "stream": False,
     }
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(cfg["url"], data=body, method="POST", headers={
-        "Content-Type": "application/json",
+    headers = {
         "Authorization": f"Bearer {cfg['key']}",
-    })
-    with urllib.request.urlopen(req, timeout=120) as r:
-        resp = json.loads(r.read())
-    return resp["choices"][0]["message"]["content"]
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    if HAS_REQUESTS:
+        resp = _requests.post(cfg["url"], headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+    else:
+        body = json.dumps(payload).encode()
+        req = urllib.request.Request(cfg["url"], data=body, method="POST", headers=headers)
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return json.loads(r.read())["choices"][0]["message"]["content"]
 
 def pick_model(task_title, task_desc):
     """Pick the cheapest model for the task. Default: mistral."""
