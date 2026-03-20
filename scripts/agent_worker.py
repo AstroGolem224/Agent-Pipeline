@@ -11,6 +11,12 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
+try:
+    from openai import OpenAI as _OpenAI
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
 # ─── Config ───
 PM_BASE = "http://100.115.61.30:8000/api"
 PROJECT_ID = "c719a8f5-86e8-4620-99d3-05f2c2ee4f37"
@@ -23,18 +29,30 @@ COL_DONE = "b4b10fd6-6eae-4239-a951-72926000c921"
 NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "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")
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 
+NEMOTRON_KEY = "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"
+
 MODELS = {
     "mistral": {
         "url": NVIDIA_URL,
         "key": NVIDIA_KEY,
         "model": "mistralai/mistral-large-3-675b-instruct-2512",
         "max_tokens": 8192,
+        "backend": "requests",
     },
     "kimi": {
         "url": NVIDIA_URL,
         "key": NVIDIA_KEY,
         "model": "moonshotai/kimi-k2.5",
         "max_tokens": 8192,
+        "backend": "requests",
+    },
+    "nemotron": {
+        "url": "https://integrate.api.nvidia.com/v1",
+        "key": NEMOTRON_KEY,
+        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "max_tokens": 16384,
+        "backend": "openai",
+        "thinking": True,
     },
 }
 
@@ -67,8 +85,42 @@ def add_result(task_id, content):
     return api("PUT", f"/tasks/{task_id}", {"title": task["title"], "description": new_desc, "priority": task["priority"]})
 
 def call_llm(model_key, system_prompt, user_prompt):
-    """Call an NVIDIA NIM model. Returns response text."""
+    """Call an NVIDIA NIM model. Returns (response_text, thinking_text_or_None)."""
     cfg = MODELS[model_key]
+    backend = cfg.get("backend", "requests")
+
+    # ── Nemotron: OpenAI client, streaming + thinking ──
+    if backend == "openai":
+        if not HAS_OPENAI:
+            raise RuntimeError("openai package not installed. Run: pip install openai")
+        client = _OpenAI(base_url=cfg["url"], api_key=cfg["key"])
+        stream = client.chat.completions.create(
+            model=cfg["model"],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=1,
+            top_p=0.95,
+            max_tokens=cfg["max_tokens"],
+            extra_body={
+                "chat_template_kwargs": {"enable_thinking": True},
+                "reasoning_budget": cfg["max_tokens"],
+            },
+            stream=True,
+        )
+        thinking_parts, answer_parts = [], []
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            reasoning = getattr(chunk.choices[0].delta, "reasoning_content", None)
+            if reasoning:
+                thinking_parts.append(reasoning)
+            if chunk.choices[0].delta.content:
+                answer_parts.append(chunk.choices[0].delta.content)
+        return "".join(answer_parts), "".join(thinking_parts) or None
+
+    # ── Mistral / Kimi: requests ──
     payload = {
         "model": cfg["model"],
         "messages": [
@@ -90,18 +142,29 @@ def call_llm(model_key, system_prompt, user_prompt):
     if HAS_REQUESTS:
         resp = _requests.post(cfg["url"], headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        return resp.json()["choices"][0]["message"]["content"], None
     else:
         body = json.dumps(payload).encode()
         req = urllib.request.Request(cfg["url"], data=body, method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read())["choices"][0]["message"]["content"]
+            return json.loads(r.read())["choices"][0]["message"]["content"], None
 
 def pick_model(task_title, task_desc):
-    """Pick the cheapest model for the task. Default: mistral."""
+    """Pick the right model based on task type.
+    
+    Tier 1 — Nemotron (thinking): Debugging, Architektur, komplexe Logik
+    Tier 2 — Kimi: Research, Analyse, Zusammenfassungen  
+    Tier 3 — Mistral: Coding, Scripts, Standard-Implementierung (default)
+    """
     text = (task_title + " " + (task_desc or "")).lower()
-    # Kimi for research/analysis, Mistral for coding
-    if any(kw in text for kw in ["research", "analyse", "recherche", "zusammenfass", "review"]):
+    nemotron_kw = ["debug", "architektur", "architecture", "warum", "fehler", "error",
+                   "refactor", "optimier", "performance", "design pattern", "komplex",
+                   "analyse.*code", "code.*review", "security", "race condition"]
+    kimi_kw = ["research", "analyse", "recherche", "zusammenfass", "dokumentation",
+               "erkläre", "erklaer", "vergleich", "überblick"]
+    if any(kw in text for kw in nemotron_kw):
+        return "nemotron"
+    if any(kw in text for kw in kimi_kw):
         return "kimi"
     return "mistral"
 
@@ -135,14 +198,18 @@ def process_task(task):
     user_prompt = f"## Task: {title}\n\n{desc}" if desc else f"## Task: {title}"
     
     try:
-        result = call_llm(model, SYSTEM_PROMPT, user_prompt)
-        log(f"  Response: {len(result)} chars")
-        
-        # Post result as comment
-        comment = f"**🤖 {model.upper()} Ergebnis:**\n\n{result}"
-        # Truncate if too long for comment
+        result, thinking = call_llm(model, SYSTEM_PROMPT, user_prompt)
+        log(f"  Response: {len(result)} chars" + (f" | Thinking: {len(thinking)} chars" if thinking else ""))
+
+        # Build result block
+        model_emoji = {"mistral": "⚡", "kimi": "🌙", "nemotron": "🧠"}.get(model, "🤖")
+        comment = f"**{model_emoji} {model.upper()} Ergebnis:**\n\n{result}"
+        if thinking:
+            # Add collapsed thinking block
+            thinking_short = thinking[:3000] + "..." if len(thinking) > 3000 else thinking
+            comment += f"\n\n---\n**💭 Thinking ({len(thinking)} chars):**\n\n```\n{thinking_short}\n```"
         if len(comment) > 10000:
-            comment = comment[:9900] + "\n\n... (gekürzt, {len(result)} Zeichen total)"
+            comment = comment[:9900] + f"\n\n... (gekürzt, {len(result)} Zeichen total)"
         add_result(task_id, comment)
         
         # Move to Review
