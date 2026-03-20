@@ -26,29 +26,37 @@ COL_REVIEW = "4fa54724-4c0e-42a5-a15b-cd8942a3389b"
 COL_DONE = "b4b10fd6-6eae-4239-a951-72926000c921"
 
 # LLM backends (cheapest first)
-NVIDIA_KEY = os.environ.get("NVIDIA_API_KEY", "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")
-NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+# ─── NVIDIA NIM Endpoints ───
+# Alle Modelle laufen über integrate.api.nvidia.com (NIM)
+# Mistral + Kimi: requests-Backend → POST /v1/chat/completions
+# Nemotron:       openai-Backend  → OpenAI-Client (ergänzt /chat/completions selbst)
+NIM_BASE        = "https://integrate.api.nvidia.com/v1"
+NIM_COMPLETIONS = f"{NIM_BASE}/chat/completions"
 
-NEMOTRON_KEY = "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"
+NIM_KEY_MISTRAL_KIMI  = os.environ.get("NVIDIA_API_KEY",  "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")
+NIM_KEY_NEMOTRON      = os.environ.get("NVIDIA_API_KEY_NEMOTRON", "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")
 
 MODELS = {
+    # Tier 3 — Standard Coding (günstig, schnell)
     "mistral": {
-        "url": NVIDIA_URL,
-        "key": NVIDIA_KEY,
+        "url": NIM_COMPLETIONS,
+        "key": NIM_KEY_MISTRAL_KIMI,
         "model": "mistralai/mistral-large-3-675b-instruct-2512",
         "max_tokens": 8192,
         "backend": "requests",
     },
+    # Tier 2 — Research & Analyse
     "kimi": {
-        "url": NVIDIA_URL,
-        "key": NVIDIA_KEY,
+        "url": NIM_COMPLETIONS,
+        "key": NIM_KEY_MISTRAL_KIMI,
         "model": "moonshotai/kimi-k2.5",
         "max_tokens": 8192,
         "backend": "requests",
     },
+    # Tier 1 — Debugging, Architektur, komplexe Logik (Thinking-Model)
     "nemotron": {
-        "url": "https://integrate.api.nvidia.com/v1",
-        "key": NEMOTRON_KEY,
+        "url": NIM_BASE,                          # OpenAI-Client ergänzt /chat/completions
+        "key": NIM_KEY_NEMOTRON,
         "model": "nvidia/nemotron-3-super-120b-a12b",
         "max_tokens": 16384,
         "backend": "openai",
